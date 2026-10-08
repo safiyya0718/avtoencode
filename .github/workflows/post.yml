@@ -1,0 +1,67 @@
+name: Post kodlash (H.265)
+
+# Kodlash botining "Post kodlash" bo'limi (`worker/src/postbot.rs`).
+# Botga rasm + video + nom yuborilsa worker shu workflow'ni o'zi ishga
+# tushiradi (cron ham har 10 daqiqada tekshiradi). Navbatdagi postlar
+# ketma-ket: H.265, boshida rasm, burchakda logotip -> `<ID>_logo.png`
+# dagi ID'ga video bo'lib, tagida post nomi bilan.
+# Avto-kodlash (H.265, `encode.yml`) bilan bog'liq emas.
+#
+# Bu fayl ARUGRAM repodagi `tool/post/post.workflow.yml` dan ko'chiriladi
+# (`sync-packs.yml`) — shu yerda o'zgartirmang.
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: arugram-post
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    env:
+      API_BASE: ${{ secrets.API_BASE || 'https://arugram.uzcom.workers.dev' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Python paketlari
+        run: pip install --no-cache-dir -r tool/encode/requirements.txt
+
+      - name: Telegram sessiyasi
+        env:
+          ENCODE_TOKEN: ${{ secrets.ENCODE_TOKEN }}
+        run: |
+          OUT=tool/post/pyro_session.session
+          K=$(printf '%s' "$ENCODE_TOKEN" | tr -d '[:space:]')
+          K="$K" openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:K \
+            -in tool/encode/session.enc -out "$OUT"
+          head -c 16 "$OUT" | grep -q "SQLite format 3" || { echo "::error::Sessiya ochilmadi (ENCODE_TOKEN noto'g'ri?)"; exit 1; }
+          echo "Sessiya tiklandi"
+
+      - name: Postlarni kodlash
+        env:
+          ENCODE_TOKEN: ${{ secrets.ENCODE_TOKEN }}
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          START_BUDGET_MIN: '300'
+          # CRF — har qanday sifatda shu qiymat. Katta qiymat = kichik fayl.
+          H265_CRF: '30'
+          H265_PRESET: medium
+          PYTHONUNBUFFERED: '1'
+        run: python3 tool/post/post.py
+
+      - name: Sessiyani o'chirish
+        if: always()
+        run: rm -f tool/post/pyro_session.session
