@@ -1,0 +1,64 @@
+name: Anibla yuklash
+
+# Kodlash botining "Anibla yuklash" bo'limi (`worker/src/anibla.rs`).
+# Botda sifat tugmasi bosilganda video bazadagi navbatga (`anibla_jobs`)
+# tushadi va worker shu workflow'ni o'zi ishga tushiradi (cron ham har
+# 10 daqiqada tekshiradi). Run navbat bo'shaguncha videolarni KETMA-KET
+# yuklab, bot chatiga yuboradi (`tool/anibla/download.py`).
+# Avto-kodlash va post kodlashdan ALOHIDA.
+#
+# Bu fayl ARUGRAM repodagi `tool/anibla/anibla.workflow.yml` dan ko'chiriladi
+# (`sync-packs.yml`) — shu yerda o'zgartirmang.
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: arugram-anibla
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    env:
+      API_BASE: ${{ secrets.API_BASE || 'https://arugram.uzcom.workers.dev' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Python paketlari
+        run: pip install --no-cache-dir -r tool/encode/requirements.txt
+
+      - name: Telegram sessiyasi
+        env:
+          ENCODE_TOKEN: ${{ secrets.ENCODE_TOKEN }}
+        run: |
+          OUT=tool/anibla/pyro_session.session
+          K=$(printf '%s' "$ENCODE_TOKEN" | tr -d '[:space:]')
+          K="$K" openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:K \
+            -in tool/encode/session.enc -out "$OUT"
+          head -c 16 "$OUT" | grep -q "SQLite format 3" || { echo "::error::Sessiya ochilmadi (ENCODE_TOKEN noto'g'ri?)"; exit 1; }
+          echo "Sessiya tiklandi"
+
+      - name: Navbatdagi videolarni yuklash
+        env:
+          ENCODE_TOKEN: ${{ secrets.ENCODE_TOKEN }}
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          START_BUDGET_MIN: '280'
+          PYTHONUNBUFFERED: '1'
+        run: python3 tool/anibla/download.py
+
+      - name: Sessiyani o'chirish
+        if: always()
+        run: rm -f tool/anibla/pyro_session.session
