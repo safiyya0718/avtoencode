@@ -1,0 +1,96 @@
+name: Avto-kodlash (H.265)
+
+on:
+  # Faqat worker (Cloudflare cron, har 10 daqiqada navbatni tekshiradi)
+  # navbat bo'sh bo'lmaganda va run ishlamayotganda ishga tushiradi.
+  # Run 4 soatdan keyin yangi ish olmaydi, 5 soatda majburan to'xtaydi;
+  # keyingi cron (yoki oxirgi qadam) uni yangidan boshlaydi.
+  # Qo'lda ham bo'ladi.
+  workflow_dispatch: {}
+
+concurrency:
+  group: arugram-encode
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  encode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      API_BASE: ${{ secrets.API_BASE || 'https://arugram.uzcom.workers.dev' }}
+    steps:
+      - name: Navbat
+        id: peek
+        env:
+          ENCODE_TOKEN: ${{ secrets.ENCODE_TOKEN }}
+        run: |
+          if [ -z "$ENCODE_TOKEN" ]; then
+            echo "::error::ENCODE_TOKEN secret'i yo'q"
+            exit 1
+          fi
+          N=$(curl -fsS -H "X-Encode-Token: $ENCODE_TOKEN" -H "User-Agent: arugram-encoder" \
+            "$API_BASE/api/encode/peek" | jq -r '.pending // 0')
+          echo "Navbatda: $N"
+          echo "pending=$N" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.peek.outputs.pending != '0'
+
+      - name: ffmpeg
+        if: steps.peek.outputs.pending != '0'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
+      - uses: actions/setup-python@v5
+        if: steps.peek.outputs.pending != '0'
+        with:
+          python-version: '3.11'
+
+      - name: Python paketlari
+        if: steps.peek.outputs.pending != '0'
+        run: pip install --no-cache-dir -r tool/encode/requirements.txt
+
+      - name: Telegram sessiyasi
+        if: steps.peek.outputs.pending != '0'
+        env:
+          ENCODE_TOKEN: ${{ secrets.ENCODE_TOKEN }}
+        run: |
+          OUT=tool/encode/pyro_session.session
+          K=$(printf '%s' "$ENCODE_TOKEN" | tr -d '[:space:]')
+          K="$K" openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:K \
+            -in tool/encode/session.enc -out "$OUT"
+          head -c 16 "$OUT" | grep -q "SQLite format 3" || { echo "::error::Sessiya ochilmadi (ENCODE_TOKEN noto'g'ri?)"; exit 1; }
+          echo "Sessiya tiklandi"
+
+      - name: Kodlash
+        id: enc
+        if: steps.peek.outputs.pending != '0'
+        env:
+          ENCODE_TOKEN: ${{ secrets.ENCODE_TOKEN }}
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          H265_CRF: '30'
+          H265_PRESET: medium
+          LOG_CHANNEL_ID: '-1004360822958'
+          START_BUDGET_MIN: '240'
+          PYTHONUNBUFFERED: '1'
+        run: python3 tool/encode/run.py
+
+      - name: Sessiyani o'chirish
+        if: always()
+        run: rm -f tool/encode/pyro_session.session
+
+      # Navbat qolgan bo'lsa — keyingi 30 daqiqani kutmasdan qayta ishga tushadi.
+      - name: Davom ettirish
+        if: success() && steps.enc.outputs.worked == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ENCODE_TOKEN: ${{ secrets.ENCODE_TOKEN }}
+        run: |
+          N=$(curl -fsS -H "X-Encode-Token: $ENCODE_TOKEN" -H "User-Agent: arugram-encoder" \
+            "$API_BASE/api/encode/peek" | jq -r '.pending // 0')
+          echo "Qolgan: $N"
+          if [ "$N" != "0" ]; then gh workflow run encode.yml --repo "$GITHUB_REPOSITORY"; fi
