@@ -1,0 +1,81 @@
+name: To'plamlar (emoji, GIF, stiker)
+
+# Foydalanuvchilar yuklagan va ADMIN TASDIQLAGAN emoji, GIF va stikerlarni
+# to'plam fayliga qo'shadi. Kodlash (`encode.yml`) dan ALOHIDA workflow.
+# Faqat worker ishga tushiradi (tasdiqlangan rasm bo'lganda); qo'lda ham bo'ladi.
+
+on:
+  workflow_dispatch: {}
+
+# ALOHIDA guruh: kodlash va to'plamlar BIR VAQTDA ishlaydi, biri
+# ikkinchisini kutmaydi. Telegram sessiyasi kodlash bilan BIR XIL
+# (`tool/encode/session.enc`) — u allaqachon bir necha joyda ishlaydi.
+concurrency:
+  group: arugram-packs
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  packs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      API_BASE: ${{ secrets.API_BASE || 'https://arugram.uzcom.workers.dev' }}
+    steps:
+      - name: Navbat
+        id: peek
+        env:
+          ENCODE_TOKEN: ${{ secrets.ENCODE_TOKEN }}
+        run: |
+          if [ -z "$ENCODE_TOKEN" ]; then
+            echo "::error::ENCODE_TOKEN secret'i yo'q"
+            exit 1
+          fi
+          N=$(curl -fsS -X POST -H "X-Encode-Token: $ENCODE_TOKEN" -H "User-Agent: arugram-encoder" \
+            "$API_BASE/api/packs/job/peek" | jq -r '.pending // 0')
+          echo "Navbatda: $N"
+          echo "pending=$N" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.peek.outputs.pending != '0'
+
+      - uses: actions/setup-python@v5
+        if: steps.peek.outputs.pending != '0'
+        with:
+          python-version: '3.11'
+
+      - name: ffmpeg (video uchun)
+        if: steps.peek.outputs.pending != '0'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
+      - name: Python paketlari
+        if: steps.peek.outputs.pending != '0'
+        run: pip install --no-cache-dir -r tool/packs/requirements.txt
+
+      - name: Telegram sessiyasi
+        if: steps.peek.outputs.pending != '0'
+        env:
+          ENCODE_TOKEN: ${{ secrets.ENCODE_TOKEN }}
+        run: |
+          OUT=tool/packs/pyro_session.session
+          K=$(printf '%s' "$ENCODE_TOKEN" | tr -d '[:space:]')
+          K="$K" openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:K \
+            -in tool/encode/session.enc -out "$OUT"
+          head -c 16 "$OUT" | grep -q "SQLite format 3" || { echo "::error::Sessiya ochilmadi (ENCODE_TOKEN noto'g'ri?)"; exit 1; }
+          echo "Sessiya tiklandi"
+
+      - name: To'plamlarni yig'ish
+        if: steps.peek.outputs.pending != '0'
+        env:
+          ENCODE_TOKEN: ${{ secrets.ENCODE_TOKEN }}
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          START_BUDGET_MIN: '240'
+          PYTHONUNBUFFERED: '1'
+        run: python3 tool/packs/run.py
+
+      - name: Sessiyani o'chirish
+        if: always()
+        run: rm -f tool/packs/pyro_session.session
