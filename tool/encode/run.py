@@ -261,6 +261,33 @@ def api(path, body=None, method="POST"):
     raise RuntimeError(f"{path}: {err}")
 
 
+def api_fmp4(path, body):
+    """`/api/fmp4/<path>` (Mini App uchun fMP4 nusxa) — xato bo'lsa jim."""
+    req = urllib.request.Request(
+        f"{API}/api/fmp4/{path}", data=json.dumps(body).encode(), method="POST",
+        headers={"X-Encode-Token": TOKEN, "Content-Type": "application/json",
+                 "User-Agent": "arugram-encoder"})
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return json.loads(r.read() or b"{}")
+        except Exception as ex:  # noqa: BLE001
+            log(f"  fmp4/{path}: {ex}")
+            time.sleep(2 + attempt * 3)
+    return {}
+
+
+def make_fmp4(src: Path, dst: Path):
+    """MP4 -> fMP4 (bo'laklangan, boshida `sidx` indeksi). QAYTA SIQILMAYDI
+    (`-c copy`) — bir necha soniya. Mini App pleyeri (MSE) uchun
+    (`worker/src/fmp4.rs`)."""
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
+         "-map", "0", "-c", "copy",
+         "-movflags", "+frag_keyframe+empty_moov+default_base_moof+global_sidx",
+         str(dst)], check=True, timeout=1800)
+
+
 def ctr_file(src: Path, dst: Path, key: bytes):
     """AES-128-CTR (IV nol, 128-bit big-endian hisoblagich)."""
     enc = Cipher(algorithms.AES(key), modes.CTR(b"\0" * 16)).encryptor()
@@ -775,6 +802,20 @@ async def process(app: Client, channel: int, job: dict):
             sealed = WORK / name
             await asyncio.to_thread(ctr_file, out, sealed, k)
             size = out.stat().st_size
+            # Mini App uchun fMP4 nusxa (ilovaga tegishli emas) — MP4 dan
+            # darhol, qayta siqmasdan. Xato bo'lsa qism baribir tayyor:
+            # Mini App so'raganda worker uni alohida navbatga qo'yadi.
+            frag = None
+            try:
+                frag_plain = WORK / f"{label}_f_plain.mp4"
+                await asyncio.to_thread(make_fmp4, out, frag_plain)
+                fk = secrets.token_bytes(16)
+                frag = (WORK / name.replace(".mp4", "_f.mp4"), fk, frag_plain.stat().st_size)
+                await asyncio.to_thread(ctr_file, frag_plain, frag[0], fk)
+                frag_plain.unlink()
+            except Exception as ex:  # noqa: BLE001
+                log(f"  {label}: fMP4 tayyorlanmadi ({ex}) — keyin navbat orqali")
+                frag = None
             out.unlink()
             STATUS.quality(label, state="upload", size_mb=round(size / 1048576, 1),
                            enc_s=int(time.time() - t),
@@ -792,6 +833,22 @@ async def process(app: Client, channel: int, job: dict):
             sealed.unlink()
             api("quality", {**ident, "quality": label, "file": name, "size": size,
                             "key": k.hex(), "msg_id": sent.id})
+            if frag is not None:
+                fpath, fk, fsize = frag
+                try:
+                    fsent = await app.send_document(
+                        channel, str(fpath), file_name=fpath.name, force_document=True,
+                        caption=fpath.name, disable_notification=True,
+                        progress=transfer_progress(f"{label} fMP4 Telegram'ga yuklanmoqda"))
+                    api_fmp4("done", {"anime_id": ident.get("anime_id"), "season_id": ident.get("season_id"),
+                                      "epizod_id": ident.get("epizod_id"), "quality": label, "ok": True,
+                                      "file": fpath.name, "size": fsize, "key": fk.hex(),
+                                      "msg_id": fsent.id})
+                    log(f"  {label}: fMP4 nusxa ham tayyor ({fsize / 1048576:.1f} MB)")
+                except Exception as ex:  # noqa: BLE001
+                    log(f"  {label}: fMP4 yuklanmadi ({ex}) — keyin navbat orqali")
+                finally:
+                    fpath.unlink(missing_ok=True)
             done.add(label)
             STATUS.quality(label, state="done")
             STATUS.update(xfer=None)
