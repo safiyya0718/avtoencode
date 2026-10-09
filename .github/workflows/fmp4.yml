@@ -1,0 +1,60 @@
+name: fMP4 nusxalar (Mini App)
+
+# Telegram Mini App pleyeri uchun eski qismlarning fMP4 nusxasi
+# (`tool/fmp4/run.py`, `worker/src/fmp4.rs`). Worker o'zi ishga tushiradi
+# (Mini App so'rovi va cron). Avto-kodlash, post va anibla'dan ALOHIDA.
+#
+# Bu fayl ARUGRAM repodagi `tool/fmp4/fmp4.workflow.yml` dan ko'chiriladi
+# (`sync-packs.yml`) — shu yerda o'zgartirmang.
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: arugram-fmp4
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  fmp4:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    env:
+      API_BASE: ${{ secrets.API_BASE || 'https://arugram.uzcom.workers.dev' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Python paketlari
+        run: pip install --no-cache-dir -r tool/encode/requirements.txt
+
+      - name: Telegram sessiyasi
+        env:
+          ENCODE_TOKEN: ${{ secrets.ENCODE_TOKEN }}
+        run: |
+          OUT=tool/fmp4/pyro_session.session
+          K=$(printf '%s' "$ENCODE_TOKEN" | tr -d '[:space:]')
+          K="$K" openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:K \
+            -in tool/encode/session.enc -out "$OUT"
+          head -c 16 "$OUT" | grep -q "SQLite format 3" || { echo "::error::Sessiya ochilmadi (ENCODE_TOKEN noto'g'ri?)"; exit 1; }
+
+      - name: Navbatdagi qismlarni fMP4 qilish
+        env:
+          ENCODE_TOKEN: ${{ secrets.ENCODE_TOKEN }}
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          START_BUDGET_MIN: '300'
+          PYTHONUNBUFFERED: '1'
+        run: python3 tool/fmp4/run.py
+
+      - name: Sessiyani o'chirish
+        if: always()
+        run: rm -f tool/fmp4/pyro_session.session
