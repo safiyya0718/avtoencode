@@ -684,6 +684,19 @@ class StatusPin:
 STATUS = StatusPin()
 
 
+def anibla_download(url: str, dst: Path):
+    """anibla.uz HLS (`video` yoki `video\naudio`) -> mp4: `tool/anibla/download.py`
+    dagi parallel yuklovchi (avtoencode reposida ham shu yo'lda turadi)."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "anibla"))
+    import download as anibla  # noqa: E402
+
+    class _Live:  # anibla holat xabari yo'q: yuklovchi o'zi har 10 s log yozadi
+        def __getattr__(self, _):
+            return lambda *a, **k: ""
+
+    anibla.download(url, dst, _Live())
+
+
 class Heartbeat:
     def __init__(self, ident):
         self.ident = ident
@@ -747,21 +760,31 @@ async def process(app: Client, channel: int, job: dict):
         log(f"Qism {a}/{s}/{e} (#{job.get('epizod_number')}), urinish {job.get('attempt')}")
         enc = WORK / "origin.enc"
         src = WORK / "origin.mp4"
-        m = await app.get_messages(channel, int(job["origin_msg"]))
-        if not m or m.empty or not (m.document or m.video):
-            raise Fatal("asl video kanalda topilmadi")
-        log("  asl video yuklab olinmoqda...")
-        await asyncio.to_thread(hb.set, "download", True)
-        got = await app.download_media(m, file_name=str(enc),
-                                       progress=transfer_progress("yuklab olinmoqda"))
-        if not got or Path(got).stat().st_size == 0:
-            raise RuntimeError("asl video yuklab olinmadi")
-        key = (job.get("origin_key") or "").strip()
-        if key:
-            await asyncio.to_thread(ctr_file, Path(got), src, bytes.fromhex(key))
-            Path(got).unlink()
+        if job.get("origin_url"):
+            # "Ilova uchun -> Anibla orqali": asl video Telegram'da emas — saytdan
+            # (HLS, eng yuqori sifat) to'g'ridan-to'g'ri yuklab, shu zahoti kodlanadi.
+            # Telegram'ning 2 GB chegarasi asl videoga tegmaydi.
+            log("  asl video anibla.uz dan yuklab olinmoqda...")
+            await asyncio.to_thread(hb.set, "download", True)
+            await asyncio.to_thread(anibla_download, job["origin_url"], src)
+            if not src.exists() or src.stat().st_size == 0:
+                raise RuntimeError("anibla.uz dan yuklab bo'lmadi")
         else:
-            Path(got).rename(src)
+            m = await app.get_messages(channel, int(job["origin_msg"]))
+            if not m or m.empty or not (m.document or m.video):
+                raise Fatal("asl video kanalda topilmadi")
+            log("  asl video yuklab olinmoqda...")
+            await asyncio.to_thread(hb.set, "download", True)
+            got = await app.download_media(m, file_name=str(enc),
+                                           progress=transfer_progress("yuklab olinmoqda"))
+            if not got or Path(got).stat().st_size == 0:
+                raise RuntimeError("asl video yuklab olinmadi")
+            key = (job.get("origin_key") or "").strip()
+            if key:
+                await asyncio.to_thread(ctr_file, Path(got), src, bytes.fromhex(key))
+                Path(got).unlink()
+            else:
+                Path(got).rename(src)
         hb.check()
         src_h, src_d = await asyncio.to_thread(probe, src)
         steps = plan(src_h)
