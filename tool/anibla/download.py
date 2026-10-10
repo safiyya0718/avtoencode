@@ -582,6 +582,7 @@ async def process(app, job):
         live.close()
         try:
             api("done", {**job.ident(), "ok": True, "channel_msg": msg,
+                         "size": size, "height": int(h or 0),
                          "text": live.text(f"✅ Tayyor ({size / 1048576:.1f} MB)")})
         except Lost:
             # Shu orada navbatdan olib tashlangan — kanaldagi nusxa ham kerak emas.
