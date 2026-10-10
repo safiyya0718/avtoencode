@@ -450,7 +450,11 @@ def encode(src: Path, dst: Path, src_h: int, target: int, dcrf: int,
            "-progress", "pipe:1", "-y", "-i", str(src),
            "-map", "0:v:0", "-map", "0:a:0?", "-map_metadata", "-1", "-sn", *vf,
            "-c:v", "libx265", "-preset", PRESET, "-crf", str(CRF_BASE - dcrf),
-           "-x265-params", "log-level=error" + (":" + X265_EXTRA if X265_EXTRA else ""), "-pix_fmt", "yuv420p", "-tag:v", "hvc1",
+           # KALIT KADR har ~2 s (foydalanuvchi: sek tez bo'lsin): sek har doim oldingi kalit
+           # kadrdan boshlab oladi — standart (~10 s) bo'lsa bir necha MB va dekodlash kerak.
+           # `open-gop=0` — yopiq GOP: har kalit kadrdan toza boshlanadi (MSE/fMP4 uchun).
+           "-force_key_frames", "expr:gte(t,n_forced*2)",
+           "-x265-params", "log-level=error:open-gop=0:keyint=120:min-keyint=24" + (":" + X265_EXTRA if X265_EXTRA else ""), "-pix_fmt", "yuv420p", "-tag:v", "hvc1",
            "-c:a", "aac", "-ac", "2", "-b:a", abr, "-ar", "44100",
            "-movflags", "+faststart", str(dst)]
     # `-progress pipe:1` — ffmpeg har soniyada `out_time_us=...` yozadi;
