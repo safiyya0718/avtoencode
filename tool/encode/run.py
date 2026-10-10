@@ -764,7 +764,7 @@ async def process(app: Client, channel: int, job: dict):
             # "Ilova uchun -> Anibla orqali": asl video Telegram'da emas — saytdan
             # (HLS, eng yuqori sifat) to'g'ridan-to'g'ri yuklab, shu zahoti kodlanadi.
             # Telegram'ning 2 GB chegarasi asl videoga tegmaydi.
-            log("  asl video anibla.uz dan yuklab olinmoqda...")
+            log(f"  asl video anibla.uz dan yuklab olinmoqda: {job.get('origin_label') or ''}")
             await asyncio.to_thread(hb.set, "download", True)
             await asyncio.to_thread(anibla_download, job["origin_url"], src)
             if not src.exists() or src.stat().st_size == 0:
